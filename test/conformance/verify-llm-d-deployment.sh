@@ -1085,18 +1085,37 @@ check_namespace() {
     log_pass "Namespace '$LLMD_NAMESPACE' exists"
 
     # Pod summary
-    local total running failed
+    local total running failed pending not_ready
     total=$($KUBECTL get pods -n "$LLMD_NAMESPACE" --no-headers 2>/dev/null | wc -l | tr -d '[:space:]')
     running=$($KUBECTL get pods -n "$LLMD_NAMESPACE" --no-headers 2>/dev/null | grep -c "Running" | tr -d '[:space:]' || echo "0")
     failed=$($KUBECTL get pods -n "$LLMD_NAMESPACE" --no-headers 2>/dev/null | grep -cE "Error|CrashLoop|Failed" | tr -d '[:space:]' || echo "0")
+    pending=$($KUBECTL get pods -n "$LLMD_NAMESPACE" --no-headers 2>/dev/null | grep -c "Pending" | tr -d '[:space:]' || echo "0")
 
-    log_info "Pods: $total total, $running running, $failed failed"
+    log_info "Pods: $total total, $running running, $pending pending, $failed failed"
 
+    # Check for failed pods
     if [[ "${failed:-0}" -gt 0 ]]; then
         log_fail "$failed pod(s) in failed state"
         $KUBECTL get pods -n "$LLMD_NAMESPACE" --no-headers | grep -E "Error|CrashLoop|Failed"
     else
         log_pass "No failed pods"
+    fi
+
+    # Check for pending pods
+    if [[ "${pending:-0}" -gt 0 ]]; then
+        log_fail "$pending pod(s) in Pending state"
+        $KUBECTL get pods -n "$LLMD_NAMESPACE" --no-headers | grep "Pending"
+    fi
+
+    # Check for pods not fully ready (Running but 0/X or partial ready)
+    # READY column shows X/Y where X < Y means not all containers ready
+    local not_ready_pods
+    not_ready_pods=$($KUBECTL get pods -n "$LLMD_NAMESPACE" --no-headers 2>/dev/null | grep "Running" | awk '{split($2,a,"/"); if(a[1]<a[2]) print $0}')
+    if [[ -n "$not_ready_pods" ]]; then
+        local not_ready_count
+        not_ready_count=$(echo "$not_ready_pods" | wc -l | tr -d '[:space:]')
+        log_fail "$not_ready_count pod(s) running but not fully ready"
+        echo "$not_ready_pods"
     fi
 
     # Show all pods
