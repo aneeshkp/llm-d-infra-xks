@@ -40,19 +40,19 @@ CA_MOUNT_PATH="${CA_MOUNT_PATH:-/var/run/secrets/opendatahub}"
 # -----------------------------------------------------------------------------
 
 log_info() {
-  echo "ℹ️  $*"
+  echo "[INFO] $*"
 }
 
 log_success() {
-  echo "✅ $*"
+  echo "[OK] $*"
 }
 
 log_error() {
-  echo "❌ $*" >&2
+  echo "[ERROR] $*" >&2
 }
 
 log_wait() {
-  echo "⏳ $*"
+  echo "[WAIT] $*"
 }
 
 # -----------------------------------------------------------------------------

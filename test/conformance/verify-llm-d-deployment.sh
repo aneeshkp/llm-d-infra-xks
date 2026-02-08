@@ -30,10 +30,10 @@
 set -euo pipefail
 
 # =============================================================================
-# DEPLOYMENT MODE: upstream (Helm) or kserve (CRD)
+# DEPLOYMENT MODE: kserve (CRD) or upstream (Helm)
 # =============================================================================
 
-DEPLOYMENT_MODE="${DEPLOYMENT_MODE:-upstream}"
+DEPLOYMENT_MODE="${DEPLOYMENT_MODE:-kserve}"
 
 # =============================================================================
 # AVAILABLE PROFILES (matching official llm-d guides)
@@ -58,8 +58,8 @@ KSERVE_PROFILES=(
     "kserve-scheduler"
 )
 
-# Combined list (set dynamically based on mode)
-AVAILABLE_PROFILES=("${UPSTREAM_PROFILES[@]}")
+# Combined list (set dynamically based on mode - default to kserve)
+AVAILABLE_PROFILES=("${KSERVE_PROFILES[@]}")
 
 # =============================================================================
 # PROFILE CONFIGURATIONS

@@ -1,10 +1,10 @@
-.PHONY: deploy deploy-all undeploy status test help check-kubeconfig sync clear-cache
-.PHONY: deploy-cert-manager deploy-istio deploy-lws
-.PHONY: undeploy-cert-manager undeploy-istio undeploy-lws
-.PHONY: conformance conformance-basic conformance-full
+.PHONY: deploy deploy-all undeploy undeploy-kserve status help check-kubeconfig sync clear-cache
+.PHONY: deploy-cert-manager deploy-istio deploy-lws deploy-kserve
+.PHONY: test conformance
 
-# Helmfile caches git dependencies - clear to get latest
 HELMFILE_CACHE := $(HOME)/.cache/helmfile
+KSERVE_REF ?= release-v0.15
+KSERVE_NAMESPACE ?= opendatahub
 
 check-kubeconfig:
 	@kubectl cluster-info >/dev/null 2>&1 || (echo "ERROR: Cannot connect to cluster. Check KUBECONFIG." && exit 1)
@@ -15,104 +15,81 @@ help:
 	@echo "Deploy:"
 	@echo "  make deploy              - Deploy cert-manager + istio"
 	@echo "  make deploy-all          - Deploy all (cert-manager + istio + lws)"
-	@echo ""
-	@echo "Deploy individual:"
-	@echo "  make deploy-cert-manager - Deploy cert-manager operator"
-	@echo "  make deploy-istio        - Deploy sail-operator (Istio)"
-	@echo "  make deploy-lws          - Deploy lws-operator"
+	@echo "  make deploy-kserve       - Deploy KServe"
 	@echo ""
 	@echo "Undeploy:"
-	@echo "  make undeploy            - Remove all"
-	@echo "  make undeploy-cert-manager"
-	@echo "  make undeploy-istio"
-	@echo "  make undeploy-lws"
+	@echo "  make undeploy            - Remove all infrastructure"
+	@echo "  make undeploy-kserve     - Remove KServe"
 	@echo ""
 	@echo "Other:"
 	@echo "  make status              - Show deployment status"
-	@echo "  make test                - Run tests"
+	@echo "  make test                - Run ODH conformance tests"
 	@echo "  make sync                - Fetch latest from git repos"
 	@echo "  make clear-cache         - Clear helmfile git cache"
-	@echo ""
-	@echo "Conformance Tests:"
-	@echo "  make conformance NAMESPACE=llm-d                    - Run conformance (auto-detect profile)"
-	@echo "  make conformance NAMESPACE=llm-d PROFILE=full       - Run with specific profile"
-	@echo "  make conformance-list                               - List available profiles"
 
-# Clear helmfile git cache to force fresh pulls
 clear-cache:
 	@echo "=== Clearing helmfile cache ==="
 	helmfile cache info
 	helmfile cache cleanup
 	@echo "Cache cleared"
 
-# Sync (fetch latest from git repos)
 sync: clear-cache
-	@echo "=== Syncing helm repos ==="
 	helmfile deps
 
-# Deploy cert-manager + istio (default)
+# Deploy
 deploy: check-kubeconfig clear-cache
-	@echo "=== Deploying cert-manager + istio ==="
 	helmfile apply --selector name=cert-manager-operator
 	helmfile apply --selector name=sail-operator
 	@$(MAKE) status
 
-# Deploy all including lws
 deploy-all: check-kubeconfig clear-cache
-	@echo "=== Deploying all (cert-manager + istio + lws) ==="
 	helmfile apply
 	@$(MAKE) status
 
-# Deploy individual components
 deploy-cert-manager: check-kubeconfig clear-cache
-	@echo "=== Deploying cert-manager ==="
 	helmfile apply --selector name=cert-manager-operator
 
 deploy-istio: check-kubeconfig clear-cache
-	@echo "=== Deploying istio ==="
 	helmfile apply --selector name=sail-operator
 
 deploy-lws: check-kubeconfig clear-cache
-	@echo "=== Deploying lws ==="
 	helmfile apply --selector name=lws-operator
 
-# Undeploy all
-undeploy: check-kubeconfig clear-cache
-	@echo "=== Removing all ==="
-	-helmfile destroy || true
-	@echo "=== Cleaning up namespaces ==="
-	-kubectl delete namespace istio-system --ignore-not-found --wait=false
-	-kubectl delete namespace cert-manager --ignore-not-found --wait=false
-	-kubectl delete namespace cert-manager-operator --ignore-not-found --wait=false
-	-kubectl delete namespace openshift-lws-operator --ignore-not-found --wait=false
-	@echo "=== Cleaning up Istio resources ==="
-	-kubectl delete istio --all -A --ignore-not-found 2>/dev/null || true
-	-kubectl delete mutatingwebhookconfiguration istio-sidecar-injector --ignore-not-found 2>/dev/null || true
-	-kubectl delete validatingwebhookconfiguration istio-validator-istio-system --ignore-not-found 2>/dev/null || true
-	@echo "=== Done ==="
+deploy-kserve: check-kubeconfig
+	@echo "=== Deploying KServe (ref=$(KSERVE_REF)) ==="
+	kubectl create namespace $(KSERVE_NAMESPACE) --dry-run=client -o yaml | kubectl apply -f -
+	-kubectl get secret redhat-pull-secret -n istio-system -o yaml 2>/dev/null | \
+		sed 's/namespace: istio-system/namespace: $(KSERVE_NAMESPACE)/' | \
+		kubectl apply -f - 2>/dev/null || true
+	kubectl apply -k "https://github.com/opendatahub-io/kserve/config/overlays/odh-test/cert-manager?ref=$(KSERVE_REF)"
+	kubectl wait --for=condition=Ready clusterissuer/opendatahub-ca-issuer --timeout=120s
+	@echo "Applying CRDs and deployment (CR errors expected, will retry)..."
+	-kustomize build "https://github.com/opendatahub-io/kserve/config/overlays/odh-xks?ref=$(KSERVE_REF)" | kubectl apply --server-side --force-conflicts -f - 2>/dev/null || true
+	@echo "Removing webhooks to allow controller startup..."
+	-kubectl delete validatingwebhookconfiguration llminferenceservice.serving.kserve.io llminferenceserviceconfig.serving.kserve.io --ignore-not-found 2>/dev/null || true
+	kubectl wait --for=condition=Available deployment/kserve-controller-manager -n $(KSERVE_NAMESPACE) --timeout=300s
+	@echo "Controller ready, applying CRs..."
+	kustomize build "https://github.com/opendatahub-io/kserve/config/overlays/odh-xks?ref=$(KSERVE_REF)" | kubectl apply --server-side --force-conflicts -f -
+	@echo "=== KServe deployed ==="
 
-# Undeploy individual components
-undeploy-cert-manager: check-kubeconfig clear-cache
-	-helmfile destroy --selector name=cert-manager-operator || true
-	-kubectl delete namespace cert-manager --ignore-not-found --wait=false
-	-kubectl delete namespace cert-manager-operator --ignore-not-found --wait=false
+# Undeploy
+undeploy: check-kubeconfig
+	@./scripts/cleanup.sh -y
 
-undeploy-istio: check-kubeconfig clear-cache
-	-helmfile destroy --selector name=sail-operator || true
-	-kubectl delete istio --all -n istio-system --ignore-not-found 2>/dev/null || true
-	-kubectl delete namespace istio-system --ignore-not-found --wait=false
-	-kubectl delete mutatingwebhookconfiguration istio-sidecar-injector --ignore-not-found 2>/dev/null || true
-	-kubectl delete validatingwebhookconfiguration istio-validator-istio-system --ignore-not-found 2>/dev/null || true
-
-undeploy-lws: check-kubeconfig clear-cache
-	-helmfile destroy --selector name=lws-operator || true
-	-kubectl delete namespace openshift-lws-operator --ignore-not-found --wait=false
+undeploy-kserve: check-kubeconfig
+	-@kubectl delete llminferenceservice --all -A --ignore-not-found 2>/dev/null || true
+	-@kubectl delete inferencepool --all -A --ignore-not-found 2>/dev/null || true
+	-@kubectl delete deployment kserve-controller-manager -n $(KSERVE_NAMESPACE) --ignore-not-found 2>/dev/null || true
+	-@kubectl delete validatingwebhookconfiguration llminferenceservice.serving.kserve.io llminferenceserviceconfig.serving.kserve.io --ignore-not-found 2>/dev/null || true
+	-@kubectl get crd -o name | grep -E "serving.kserve.io|inference.networking" | xargs -r kubectl delete --ignore-not-found 2>/dev/null || true
+	-@kubectl delete clusterissuer opendatahub-ca-issuer --ignore-not-found 2>/dev/null || true
+	-@kubectl delete namespace $(KSERVE_NAMESPACE) --ignore-not-found --wait=false 2>/dev/null || true
+	@echo "=== KServe removed ==="
 
 # Status
 status: check-kubeconfig
 	@echo ""
 	@echo "=== Deployment Status ==="
-	@echo ""
 	@echo "cert-manager-operator:"
 	@kubectl get pods -n cert-manager-operator 2>/dev/null || echo "  Not deployed"
 	@echo ""
@@ -125,32 +102,11 @@ status: check-kubeconfig
 	@echo "lws-operator:"
 	@kubectl get pods -n openshift-lws-operator 2>/dev/null || echo "  Not deployed"
 
-# Test
-test: check-kubeconfig
-	@echo "=== Running tests ==="
-	@cd ../cert-manager-operator-chart && make test 2>/dev/null || echo "[cert-manager] SKIP"
-	@cd ../sail-operator-chart && make test 2>/dev/null || echo "[istio] SKIP"
-	@cd ../lws-operator-chart && make test 2>/dev/null || echo "[lws] SKIP"
-	@echo "=== Done ==="
-
-# Conformance Tests
+# Test/Conformance (ODH deployment validation)
 NAMESPACE ?= llm-d
-PROFILE ?= basic
-TIMEOUT ?= 120
+PROFILE ?= kserve-basic
+
+test: conformance
 
 conformance: check-kubeconfig
-	@echo "=== Running LLM-D Conformance Tests ==="
-	@./test/conformance/verify-llm-d-deployment.sh \
-		--namespace $(NAMESPACE) \
-		--profile $(PROFILE) \
-		--timeout $(TIMEOUT)
-
-conformance-list:
-	@./test/conformance/verify-llm-d-deployment.sh --list-profiles
-
-conformance-quick: check-kubeconfig
-	@echo "=== Running Quick Conformance (skip inference) ==="
-	@./test/conformance/verify-llm-d-deployment.sh \
-		--namespace $(NAMESPACE) \
-		--profile $(PROFILE) \
-		--skip-inference
+	@./test/conformance/verify-llm-d-deployment.sh --namespace $(NAMESPACE) --profile $(PROFILE)

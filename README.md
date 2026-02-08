@@ -7,24 +7,23 @@ Infrastructure Helm charts for deploying KServe LLMInferenceService on xKS platf
 | Component | App Version | Description |
 |-----------|-------------|-------------|
 | cert-manager-operator | 1.15.2 | TLS certificate management |
-| sail-operator (Istio) | 3.1.4 | Gateway API for inference routing |
+| sail-operator (Istio) | 3.1.x / 3.2.x | Gateway API for inference routing |
 | lws-operator | 1.0 | LeaderWorkerSet controller for multi-node workloads |
 
-### OSSM/Istio Version Compatibility
+### Version Compatibility
 
-| Sail Operator | Istio Version | InferencePool API | KServe Compatibility |
-|---------------|---------------|-------------------|----------------------|
-| **3.1.x** | **v1.26.x** | `inference.networking.x-k8s.io/v1alpha2` | **KServe v0.15** (uses v1alpha2) |
-| 3.2.x | v1.27.x | `inference.networking.k8s.io/v1` | Future KServe versions (v1 API) |
+| Stack | Sail Branch | OSSM | Istio | InferencePool API | KServe Branch | Status |
+|-------|-------------|------|-------|-------------------|---------------|--------|
+| **v1alpha2** | `release-3.1` | 3.1.x | v1.26.x | `inference.networking.x-k8s.io/v1alpha2` | `release-v0.15` | **Working** |
+| v1 | `main` | 3.2.x | v1.27.x | `inference.networking.k8s.io/v1` | `master` | Pending (no odh-xks) |
 
-> **Important:** KServe v0.15 creates InferencePool using the experimental `v1alpha2` API.
-> OSSM 3.2 watches the stable `v1` API, which is incompatible.
-> **Use OSSM 3.1.x (Istio 1.26.x) for KServe v0.15.**
+> **Current Status:** Use the **v1alpha2 stack** (`release-3.1` + `release-v0.15`) for production.
+> The v1 stack requires KServe `master` to merge the `odh-xks` overlay (currently only in `release-v0.15`).
 
 ## Prerequisites
 
 - Kubernetes cluster (AKS, EKS, GKE)
-- `kubectl`, `helm`, `helmfile`, `kustomize` (v5.7+)
+- `kubectl`, `helm` (v3.17+), `helmfile`, `kustomize` (v5.7+)
 - Red Hat account (for Sail Operator and vLLM images from `registry.redhat.io`)
 
 ### Red Hat Pull Secret Setup
@@ -48,7 +47,7 @@ Password: {REGISTRY-SERVICE-ACCOUNT-PASSWORD}
 Login Succeeded!
 
 # Verify it works
-$ podman pull registry.redhat.io/openshift-service-mesh/istio-sail-operator-bundle:3.1
+$ podman pull registry.redhat.io/openshift-service-mesh/istio-sail-operator-bundle:3.2
 ```
 
 Then configure `values.yaml`:
@@ -102,6 +101,17 @@ make status
 ### Step 2: Deploy KServe
 
 ```bash
+make deploy-kserve
+
+# Verify
+kubectl get pods -n opendatahub
+kubectl get llminferenceserviceconfig -n opendatahub
+```
+
+<details>
+<summary>Manual steps (click to expand)</summary>
+
+```bash
 # Create opendatahub namespace
 kubectl create namespace opendatahub --dry-run=client -o yaml | kubectl apply -f -
 
@@ -114,24 +124,42 @@ kubectl get secret redhat-pull-secret -n istio-system -o yaml | \
 kubectl apply -k "https://github.com/opendatahub-io/kserve/config/overlays/odh-test/cert-manager?ref=release-v0.15"
 kubectl wait --for=condition=Ready clusterissuer/opendatahub-ca-issuer --timeout=120s
 
-# Deploy KServe with odh-xks overlay (run twice - first applies CRDs, second applies CRs)
-kustomize build "https://github.com/opendatahub-io/kserve/config/overlays/odh-xks?ref=release-v0.15" | kubectl apply --server-side --force-conflicts -f -
-sleep 5
-kustomize build "https://github.com/opendatahub-io/kserve/config/overlays/odh-xks?ref=release-v0.15" | kubectl apply --server-side --force-conflicts -f -
+# First apply - creates CRDs and deployment (CR errors expected due to webhook)
+kustomize build "https://github.com/opendatahub-io/kserve/config/overlays/odh-xks?ref=release-v0.15" | kubectl apply --server-side --force-conflicts -f - || true
+
+# Delete webhooks to allow controller startup
+kubectl delete validatingwebhookconfiguration llminferenceservice.serving.kserve.io llminferenceserviceconfig.serving.kserve.io --ignore-not-found
 
 # Wait for controller to be ready
 kubectl wait --for=condition=Available deployment/kserve-controller-manager -n opendatahub --timeout=300s
+
+# Second apply - now webhooks work, applies CRs
+kustomize build "https://github.com/opendatahub-io/kserve/config/overlays/odh-xks?ref=release-v0.15" | kubectl apply --server-side --force-conflicts -f -
 
 # Verify LLMInferenceServiceConfig templates exist
 kubectl get llminferenceserviceconfig -n opendatahub
 ```
 
+</details>
+
 ### Step 3: Set up Gateway
 
 ```bash
-cd /path/to/llm-d-infra-xks
 ./scripts/setup-gateway.sh
+
+# Verify
+kubectl get gateway -n opendatahub
 ```
+
+<details>
+<summary>What the script does (click to expand)</summary>
+
+The script:
+1. Copies the CA bundle from cert-manager to opendatahub namespace
+2. Creates a Gateway with the CA bundle mounted for mTLS to backend services
+3. Patches the Gateway pod to use the pull secret
+
+</details>
 
 ### Step 4: Deploy LLMInferenceService
 
@@ -225,7 +253,42 @@ EOF
 kubectl get llmisvc -n $NAMESPACE -w
 ```
 
-See [Deploying LLMInferenceService](#deploying-llminferenceservice) below for more details.
+#### Check Deployment Status
+
+```bash
+# Check pods
+kubectl get pods -n $NAMESPACE
+
+# Check events if pods are not starting
+kubectl describe llmisvc qwen2-7b-instruct -n $NAMESPACE
+```
+
+#### Test Inference
+
+```bash
+# Get the service URL
+SERVICE_URL=$(kubectl get llmisvc qwen2-7b-instruct -n $NAMESPACE -o jsonpath='{.status.url}')
+
+# Test with curl (use external gateway IP)
+curl -X POST "${SERVICE_URL}/v1/chat/completions" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "Qwen/Qwen2.5-7B-Instruct",
+    "messages": [{"role": "user", "content": "What is Kubernetes?"}],
+    "max_tokens": 100
+  }'
+```
+
+#### More Examples
+
+| Example | Description | Path |
+|---------|-------------|------|
+| CPU (OPT-125M) | Simple CPU deployment for testing | `docs/samples/llmisvc/opt-125m-cpu/` |
+| GPU with Scheduler | Intelligent request routing | `docs/samples/llmisvc/single-node-gpu/` |
+| Prefill-Decode | Disaggregated serving | `docs/samples/llmisvc/single-node-gpu/llm-inference-service-pd-qwen2-7b-gpu.yaml` |
+| Multi-node MoE | DeepSeek with expert parallelism | `docs/samples/llmisvc/dp-ep/` |
+
+See the [KServe samples](https://github.com/opendatahub-io/kserve/tree/main/docs/samples/llmisvc) for more examples.
 
 ---
 
@@ -235,21 +298,18 @@ See [Deploying LLMInferenceService](#deploying-llminferenceservice) below for mo
 # Deploy
 make deploy              # cert-manager + istio
 make deploy-all          # cert-manager + istio + lws
-
-# Deploy individual
-make deploy-cert-manager
-make deploy-istio
-make deploy-lws
+make deploy-kserve       # Deploy KServe
 
 # Undeploy
-make undeploy            # Remove all
-make undeploy-cert-manager
-make undeploy-istio
-make undeploy-lws
+make undeploy            # Remove all infrastructure
+make undeploy-kserve     # Remove KServe
+
+# Test (ODH conformance)
+make test NAMESPACE=llm-d           # Run conformance tests
+make test PROFILE=kserve-gpu        # With specific profile
 
 # Other
 make status              # Show status
-make test                # Run tests
 make sync                # Update helm repos
 ```
 
@@ -314,129 +374,6 @@ This enables KServe to automatically create `PodMonitor` resources for vLLM pods
 
 ---
 
-## Deploying LLMInferenceService
-
-After infrastructure and KServe are ready, you can deploy LLM models.
-
-### Prerequisites Checklist
-
-```bash
-# 1. Verify infrastructure is running
-make status
-
-# 2. Verify KServe controller is running
-kubectl get pods -n opendatahub -l control-plane=kserve-controller-manager
-
-# 3. Verify Gateway is programmed
-kubectl get gateway -n opendatahub
-
-# 4. Verify Gateway pod is running (not ErrImagePull)
-kubectl get pods -n opendatahub -l gateway.networking.k8s.io/gateway-name=inference-gateway
-```
-
-### Set up Namespace with Pull Secret
-
-**Important:** vLLM images are from `registry.redhat.io` which requires a Red Hat pull secret.
-
-```bash
-export NAMESPACE=llm-d-test
-kubectl create namespace $NAMESPACE --dry-run=client -o yaml | kubectl apply -f -
-
-# Copy pull secret from istio-system (created by infrastructure deployment)
-kubectl get secret redhat-pull-secret -n istio-system -o yaml | \
-  sed "s/namespace: istio-system/namespace: $NAMESPACE/" | \
-  kubectl apply -f -
-
-# Patch default ServiceAccount to use pull secret (all pods will inherit it)
-kubectl patch serviceaccount default -n $NAMESPACE \
-  -p '{"imagePullSecrets": [{"name": "redhat-pull-secret"}]}'
-```
-
-> **Note:** For gated HuggingFace models, you may also need to create a secret with your HF token.
-
-### Sample: Deploy Qwen2.5-7B with Scheduler
-
-```bash
-kubectl apply -n $NAMESPACE -f - <<'EOF'
-apiVersion: serving.kserve.io/v1alpha1
-kind: LLMInferenceService
-metadata:
-  name: qwen2-7b-instruct
-spec:
-  model:
-    uri: hf://Qwen/Qwen2.5-7B-Instruct
-    name: Qwen/Qwen2.5-7B-Instruct
-  replicas: 1
-  router:
-    route: {}
-    gateway: {}
-    scheduler: {}   # Enable EPP scheduler for intelligent routing
-  template:
-    containers:
-      - name: main
-        resources:
-          limits:
-            cpu: '4'
-            memory: 32Gi
-            nvidia.com/gpu: "1"
-          requests:
-            cpu: '2'
-            memory: 16Gi
-            nvidia.com/gpu: "1"
-        livenessProbe:
-          httpGet:
-            path: /health
-            port: 8000
-            scheme: HTTPS
-          initialDelaySeconds: 120
-          periodSeconds: 30
-          timeoutSeconds: 30
-          failureThreshold: 5
-EOF
-```
-
-### Check Deployment Status
-
-```bash
-# Watch LLMInferenceService status
-kubectl get llmisvc -n $NAMESPACE -w
-
-# Check pods
-kubectl get pods -n $NAMESPACE
-
-# Check events if pods are not starting
-kubectl describe llmisvc qwen2-7b-instruct -n $NAMESPACE
-```
-
-### Test Inference
-
-```bash
-# Get the service URL
-SERVICE_URL=$(kubectl get llmisvc qwen2-7b-instruct -n $NAMESPACE -o jsonpath='{.status.url}')
-
-# Test with curl (use external gateway IP)
-curl -X POST "${SERVICE_URL}/v1/chat/completions" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "model": "Qwen/Qwen2.5-7B-Instruct",
-    "messages": [{"role": "user", "content": "What is Kubernetes?"}],
-    "max_tokens": 100
-  }'
-```
-
-### More Examples
-
-| Example | Description | Path |
-|---------|-------------|------|
-| CPU (OPT-125M) | Simple CPU deployment for testing | `docs/samples/llmisvc/opt-125m-cpu/` |
-| GPU with Scheduler | Intelligent request routing | `docs/samples/llmisvc/single-node-gpu/` |
-| Prefill-Decode | Disaggregated serving | `docs/samples/llmisvc/single-node-gpu/llm-inference-service-pd-qwen2-7b-gpu.yaml` |
-| Multi-node MoE | DeepSeek with expert parallelism | `docs/samples/llmisvc/dp-ep/` |
-
-See the [KServe samples](https://github.com/opendatahub-io/kserve/tree/release-v0.15/docs/samples/llmisvc) for more examples.
-
----
-
 ## Troubleshooting
 
 ### KServe Controller Issues
@@ -451,7 +388,7 @@ kubectl wait --for=condition=Ready certificate/kserve-webhook-server -n opendata
 kustomize build "https://github.com/opendatahub-io/kserve/config/overlays/odh-xks?ref=release-v0.15" | kubectl apply --server-side --force-conflicts -f -
 ```
 
-If webhook validation blocks apply:
+If webhook validation blocks apply (manual deployment only - `make deploy-kserve` handles this automatically):
 ```bash
 kubectl delete validatingwebhookconfiguration llminferenceservice.serving.kserve.io llminferenceserviceconfig.serving.kserve.io
 kustomize build "https://github.com/opendatahub-io/kserve/config/overlays/odh-xks?ref=release-v0.15" | kubectl apply --server-side --force-conflicts -f -
@@ -496,20 +433,27 @@ kubectl wait --for=delete pod -l app=istiod -n istio-system --timeout=120s
 # 3. Delete problematic CRDs (if switching major versions)
 kubectl delete crd ztunnels.sailoperator.io --ignore-not-found
 
-# 4. Update sail-operator-chart to new bundle version
-cd charts/sail-operator
-./scripts/update-bundle.sh 3.1.4 redhat
-
-# 5. Update istioVersion in values.yaml to match bundle
-# OSSM 3.1.x -> v1.26.x, OSSM 3.2.x -> v1.27.x
-sed -i 's/istioVersion: .*/istioVersion: "v1.26.6"/' values.yaml
-
-# 6. Redeploy
-cd ../..
+# 4. Redeploy with latest charts
 make deploy-istio
 ```
 
-> **Note:** The `istio-cr.yaml` template uses `{{ .Values.istioVersion }}` so you must update values.yaml when changing OSSM versions.
+> **Note:** The sail-operator-chart is pulled from GitHub with the branch configured in helmfile.yaml.gotmpl.
+> Current default: `release-3.1` branch (OSSM 3.1.x / Istio v1.26.x / v1alpha2 InferencePool)
+
+### Upgrading to v1 InferencePool API (Future)
+
+When KServe `master` branch includes the `odh-xks` overlay, upgrade to v1 API:
+
+Edit `helmfile.yaml.gotmpl`:
+```yaml
+# Upgrade to OSSM 3.2.x for v1 InferencePool
+- path: git::https://github.com/aneeshkp/sail-operator-chart.git@helmfile.yaml.gotmpl?ref=main
+```
+
+And update `KSERVE_REF` in Makefile:
+```makefile
+KSERVE_REF ?= master
+```
 
 ---
 
@@ -545,7 +489,7 @@ llm-d-infra-xks/
 ├── Makefile
 ├── README.md
 └── scripts/
-    ├── copy-pull-secret.sh    # Copy pull secret to app namespaces
+    ├── cleanup.sh             # Cleanup infrastructure (helmfile destroy + finalizers)
     └── setup-gateway.sh       # Set up Gateway with CA bundle for mTLS
 ```
 
