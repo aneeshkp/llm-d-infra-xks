@@ -96,7 +96,9 @@ For GPU-accelerated inference, ensure your cluster has GPU nodes with the NVIDIA
 
 **Azure Kubernetes Service (AKS)**
 
-For detailed AKS cluster setup including GPU node pools, see the [AKS Infrastructure Guide](https://llm-d.ai/docs/guide/InfraProviders/aks).
+For AKS cluster provisioning with GPU nodes, see:
+- [AKS Provisioning Scripts](https://github.com/kwozyman/llm-d-xks-aks) - Automated cluster creation with GPU Operator
+- [AKS Infrastructure Guide](https://llm-d.ai/docs/guide/InfraProviders/aks) - Manual setup instructions
 
 **CoreWeave Kubernetes Service (CKS)**
 

@@ -129,20 +129,20 @@ The script detects deployments that exist but are scaled to 0:
 
 The script auto-detects the cloud platform:
 
-| Platform | Detection Method |
-|----------|------------------|
-| **AKS** | Node label `kubernetes.azure.com/cluster` |
-| **EKS** | Node providerID prefix `aws` |
-| **GKE** | Node providerID prefix `gce` |
-| **OpenShift** | API resource `routes.route.openshift.io` |
-| **CoreWeave** | Node region label contains `coreweave` |
+| Platform | Detection Method | Supported |
+|----------|------------------|-----------|
+| **AKS** | Node label `kubernetes.azure.com/cluster` | Yes |
+| **CoreWeave** | Node region label contains `coreweave` | Yes |
+| **EKS** | Node providerID prefix `aws` | No |
+| **GKE** | Node providerID prefix `gce` | No |
+| **OpenShift** | API resource `routes.route.openshift.io` | Use ODH overlay |
 
 Platform detection enables platform-specific behaviors like preferring Azure Managed Prometheus on AKS.
 
 ## Auto-Detection
 
 The script automatically detects:
-- **Cloud Platform**: AKS, EKS, GKE, OpenShift, CoreWeave
+- **Cloud Platform**: AKS, CoreWeave (supported)
 - **Monitoring Namespace**: Scans common namespaces for Prometheus pods
 - **Azure Managed Prometheus**: Detects ama-metrics pods on AKS
 - **Inference Service**: Scans for services matching gateway patterns

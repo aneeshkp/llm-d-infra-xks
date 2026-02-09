@@ -1,6 +1,13 @@
 # llm-d-infra-xks
 
-Infrastructure Helm charts for deploying KServe LLMInferenceService on xKS platforms (AKS, EKS, GKE).
+Infrastructure Helm charts for deploying KServe LLMInferenceService on xKS platforms (AKS, CoreWeave).
+
+## Related Repositories
+
+| Repository | Purpose |
+|------------|---------|
+| [llm-d-xks-aks](https://github.com/kwozyman/llm-d-xks-aks) | AKS cluster provisioning (creates cluster + GPU nodes + GPU Operator) |
+| [rhaii-xks-kserve](https://github.com/pierDipi/rhaii-xks-kserve) | KServe Helm charts (WIP) |
 
 ## Overview
 
@@ -21,7 +28,7 @@ Infrastructure Helm charts for deploying KServe LLMInferenceService on xKS platf
 
 ## Prerequisites
 
-- Kubernetes cluster (AKS, EKS, GKE)
+- Kubernetes cluster (AKS or CoreWeave) - see [llm-d-xks-aks](https://github.com/kwozyman/llm-d-xks-aks) for AKS provisioning
 - `kubectl`, `helm` (v3.17+), `helmfile`, `kustomize` (v5.7+)
 - Red Hat account (for Sail Operator and vLLM images from `registry.redhat.io`)
 
@@ -170,7 +177,7 @@ The script:
 | CPU | 2-4 cores | |
 | Memory | 16-32 Gi | Depends on model size |
 
-#### Node Requirements (AKS/EKS/GKE)
+#### Node Requirements
 
 Ensure your cluster has GPU nodes with the NVIDIA device plugin installed:
 
@@ -338,7 +345,7 @@ lwsOperator:
 
 ## KServe Controller Settings
 
-The odh-xks overlay disables several OpenShift-specific features for vanilla Kubernetes (AKS/EKS/GKE) compatibility:
+The odh-xks overlay disables several OpenShift-specific features for vanilla Kubernetes (AKS/CoreWeave) compatibility:
 
 ```yaml
 # Disabled by default in odh-xks overlay
