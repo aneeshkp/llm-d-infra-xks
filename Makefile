@@ -101,6 +101,19 @@ status: check-kubeconfig
 	@echo ""
 	@echo "lws-operator:"
 	@kubectl get pods -n openshift-lws-operator 2>/dev/null || echo "  Not deployed"
+	@echo ""
+	@echo "=== API Versions ==="
+	@echo -n "InferencePool API: "
+	@if kubectl get crd inferencepools.inference.networking.k8s.io >/dev/null 2>&1; then \
+		echo "v1 (inference.networking.k8s.io)"; \
+	elif kubectl get crd inferencepools.inference.networking.x-k8s.io >/dev/null 2>&1; then \
+		echo "v1alpha2 (inference.networking.x-k8s.io)"; \
+	else \
+		echo "Not installed"; \
+	fi
+	@echo -n "Istio version: "
+	@kubectl get istio default -n istio-system -o jsonpath='{.spec.version}' 2>/dev/null || echo "Not deployed"
+	@echo ""
 
 # Test/Conformance (ODH deployment validation)
 NAMESPACE ?= llm-d
