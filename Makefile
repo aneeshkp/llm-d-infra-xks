@@ -69,7 +69,7 @@ deploy-cert-manager-pki: check-kubeconfig deploy-opendatahub-prerequisites
 
 deploy-kserve: check-kubeconfig clear-cache deploy-cert-manager-pki
 	@echo "Applying KServe via Helm..."
-	helmfile apply --wait --selector name=rhaiis-xks-kserve
+	helmfile sync --wait --selector name=rhaiis-xks-kserve --skip-crds
 	@echo "=== KServe deployed ==="
 
 # Undeploy

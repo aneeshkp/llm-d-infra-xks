@@ -44,5 +44,20 @@ releases:
   - name: rhaiis-xks-kserve
     chart: oci://ghcr.io/pierdipi/kserve-rhaii-xks
     # Use dev variant until official builds are released to registry.redhat.io
-    version: 3.4.0-ea.1-dev_c68131b
+    version: 3.4.0-ea.1-dev-0915be6
     namespace: opendatahub
+    disableValidation: true
+    # CRDs are applied separately via presync hook to avoid 1MB secret size limit
+    hooks:
+      # Apply CRDs before helm install via presync
+      - events: ["presync"]
+        showlogs: true
+        command: "sh"
+        args:
+          - "-c"
+          - |
+            set -e
+            CHART_DIR=$(mktemp -d)
+            helm pull oci://ghcr.io/pierdipi/kserve-rhaii-xks --version 3.4.0-ea.1-dev-3be1464 --untar --untardir "$CHART_DIR"
+            kubectl apply -f "$CHART_DIR"/kserve-rhaii-xks/crds/ --server-side
+            rm -rf "$CHART_DIR"
